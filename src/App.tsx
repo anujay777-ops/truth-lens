@@ -12,17 +12,40 @@ import {
   ChevronRight, 
   Terminal, 
   Cpu, 
-  History, 
+  Plus,
+  Trash2,
   Activity,
   Search,
   CheckCircle2,
   XCircle,
   ExternalLink,
-  Github
+  Github,
+  Award,
+  HelpCircle,
+  TrendingDown,
+  TrendingUp
 } from "lucide-react";
 
 // Initialize Gemini API
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+interface Claim {
+  text: string;
+}
+
+interface RepoData {
+  name: string;
+  description: string;
+  language: string;
+  commit_count: number;
+  stars: number;
+  forks: number;
+  open_issues: number;
+  has_releases: boolean;
+  last_pushed: string;
+  topics: string[];
+  readme: string;
+}
 
 interface RiskFlag {
   flag: string;
@@ -30,41 +53,90 @@ interface RiskFlag {
   reason: string;
 }
 
-interface VerificationResult {
-  trust_score: number;
-  confidence_level: number;
-  verdict: "VERIFIED" | "PARTIALLY VERIFIED" | "UNVERIFIED" | "HIGH RISK";
-  claim_summary: string;
-  evidence_summary: string;
-  risk_flags: RiskFlag[];
-  verified_points: string[];
-  unverified_points: string[];
-  judge_recommendation: string;
+interface ClaimVerdict {
+  claim: string;
+  status: "SUPPORTED" | "PARTIAL" | "UNSUPPORTED" | "UNVERIFIABLE";
+  evidence_found: string;
+  trust_impact: number;
 }
 
-const SYSTEM_INSTRUCTION = `You are TruthLens AI — an objective, evidence-based hackathon submission verification engine. Your job is to analyze startup claims and compare them against technical evidence from their GitHub repository.
+interface ScoreAdjustment {
+  reason: string;
+  points: number;
+}
 
-Scoring logic you must follow:
-- Start at 100. Deduct points for each mismatch found.
-- Deduct 30 pts if claimed scale (users, revenue, downloads) has no infrastructure evidence in code (e.g., no database schema for scale, no analytics integration, no payment providers if revenue claimed).
-- Deduct 20 pts if claimed AI/ML features have no model files, training scripts, or ML libraries (tensorFlow, pytorch, etc.) in repo.
-- Deduct 15 pts if commit history is very low (<20 commits) but claim implies long-term development.
-- Deduct 10 pts per unverifiable metric that cannot be confirmed from public repo data.
-- Add 10 pts for each specific, verifiable technical detail in the claim that matches the repo (e.g., specific libraries used, architecture patterns).
-- Never go below 5 or above 98.
+interface VerificationResult {
+  overall_trust_score: number;
+  confidence_level: number;
+  verdict: "VERIFIED" | "PARTIALLY VERIFIED" | "UNVERIFIED" | "HIGH RISK";
+  verdict_summary: string;
+  repo_health: {
+    assessment: "STRONG" | "MODERATE" | "WEAK" | "EMPTY";
+    reason: string;
+  };
+  claim_verdicts: ClaimVerdict[];
+  risk_flags: RiskFlag[];
+  green_flags: string[];
+  judge_probe_questions: string[];
+  score_breakdown: {
+    base: number;
+    deductions: ScoreAdjustment[];
+    additions: ScoreAdjustment[];
+  };
+}
 
-Be skeptical but fair. Flag inconsistencies clearly but acknowledge genuine technical depth when present.
+const SYSTEM_INSTRUCTION = `You are TruthLens AI — a rigorous, evidence-based verification engine for hackathon submissions. You cross-reference what teams *claim* in their pitch against what they *actually built* in their GitHub repository.
+
+Scoring Rules:
+Start at 100.
+DEDUCTIONS:
+- Claimed scale (users/revenue/downloads) with no backend, DB, or infra evidence → -30
+- Claimed AI/ML feature with no model files, training scripts, or ML libraries → -25
+- Commit count < 15 but pitch implies months of work → -20
+- Metric (speed, accuracy, %, users) that is totally unverifiable from public repo → -10 each (max -30)
+- README is missing, empty, or just a template → -15
+- No releases + claims production-ready product → -10
+- Repo description contradicts pitch deck claims → -20
+
+ADDITIONS:
+- Specific technical architecture detail in claim matches repo structure → +10 each (max +20)
+- Commit history is active (50+ commits) → +10
+- Has working demo link in README → +10
+- Claim is appropriately scoped for a hackathon (not overclaiming) → +10
+- Open source dependencies match claimed tech stack → +5
+
+HARD LIMITS: Score never below 5 or above 97.
 
 Return ONLY a valid JSON object matching the requested schema. No preamble.`;
 
 const RESPONSE_SCHEMA = {
   type: Type.OBJECT,
   properties: {
-    trust_score: { type: Type.INTEGER },
+    overall_trust_score: { type: Type.INTEGER },
     confidence_level: { type: Type.INTEGER },
     verdict: { type: Type.STRING },
-    claim_summary: { type: Type.STRING },
-    evidence_summary: { type: Type.STRING },
+    verdict_summary: { type: Type.STRING },
+    repo_health: {
+      type: Type.OBJECT,
+      properties: {
+        assessment: { type: Type.STRING },
+        reason: { type: Type.STRING }
+      },
+      required: ["assessment", "reason"]
+    },
+    claim_verdicts: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          claim: { type: Type.STRING },
+          status: { type: Type.STRING },
+          evidence_found: { type: Type.STRING },
+          trust_impact: { type: Type.INTEGER }
+        },
+        required: ["claim", "status", "evidence_found", "trust_impact"]
+      }
+    },
     risk_flags: {
       type: Type.ARRAY,
       items: {
@@ -77,61 +149,127 @@ const RESPONSE_SCHEMA = {
         required: ["flag", "severity", "reason"]
       }
     },
-    verified_points: {
+    green_flags: {
       type: Type.ARRAY,
       items: { type: Type.STRING }
     },
-    unverified_points: {
+    judge_probe_questions: {
       type: Type.ARRAY,
       items: { type: Type.STRING }
     },
-    judge_recommendation: { type: Type.STRING }
+    score_breakdown: {
+      type: Type.OBJECT,
+      properties: {
+        base: { type: Type.INTEGER },
+        deductions: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              reason: { type: Type.STRING },
+              points: { type: Type.INTEGER }
+            },
+            required: ["reason", "points"]
+          }
+        },
+        additions: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              reason: { type: Type.STRING },
+              points: { type: Type.INTEGER }
+            },
+            required: ["reason", "points"]
+          }
+        }
+      },
+      required: ["base", "deductions", "additions"]
+    }
   },
   required: [
-    "trust_score", 
-    "confidence_level", 
-    "verdict", 
-    "claim_summary", 
-    "evidence_summary", 
-    "risk_flags", 
-    "verified_points", 
-    "unverified_points", 
-    "judge_recommendation"
+    "overall_trust_score",
+    "confidence_level",
+    "verdict",
+    "verdict_summary",
+    "repo_health",
+    "claim_verdicts",
+    "risk_flags",
+    "green_flags",
+    "judge_probe_questions",
+    "score_breakdown"
   ]
 };
 
 export default function App() {
-  const [claim, setClaim] = useState("");
-  const [evidence, setEvidence] = useState("");
+  const [claims, setClaims] = useState<string[]>([""]);
+  const [repo, setRepo] = useState<RepoData>({
+    name: "",
+    description: "",
+    language: "",
+    commit_count: 0,
+    stars: 0,
+    forks: 0,
+    open_issues: 0,
+    has_releases: false,
+    last_pushed: new Date().toISOString().split('T')[0],
+    topics: [],
+    readme: ""
+  });
+  
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<VerificationResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const addClaim = () => {
+    if (claims.length < 5) setClaims([...claims, ""]);
+  };
+
+  const updateClaim = (index: number, value: string) => {
+    const newClaims = [...claims];
+    newClaims[index] = value;
+    setClaims(newClaims);
+  };
+
+  const removeClaim = (index: number) => {
+    if (claims.length > 1) {
+      setClaims(claims.filter((_, i) => i !== index));
+    }
+  };
+
   const handleVerify = async () => {
-    if (!claim.trim() || !evidence.trim()) {
-      setError("Please provide both a claim and repository evidence.");
+    const validClaims = claims.filter(c => c.trim().length > 0);
+    if (validClaims.length === 0 || !repo.name.trim()) {
+      setError("Please provide at least one claim and repository name.");
       return;
     }
 
     setLoading(true);
     setError(null);
-    setResult(null);
 
     try {
+      const input = {
+        claims: validClaims,
+        repo: {
+          ...repo,
+          readme: repo.readme.substring(0, 1200) // Truncate as per request
+        }
+      };
+
       const response = await ai.models.generateContent({
         model: "gemini-3.1-pro-preview",
         contents: [
           {
             role: "user",
             parts: [
-              { text: `CLAIM: ${claim}\n\nEVIDENCE: ${evidence}` }
+              { text: JSON.stringify(input, null, 2) }
             ]
           }
         ],
         config: {
           systemInstruction: SYSTEM_INSTRUCTION,
           responseMimeType: "application/json",
-          responseSchema: RESPONSE_SCHEMA,
+          responseSchema: RESPONSE_SCHEMA as any,
         }
       });
 
@@ -158,6 +296,16 @@ export default function App() {
     }
   };
 
+  const getStatusIcon = (status: string) => {
+    switch (status) {
+      case "SUPPORTED": return <CheckCircle2 className="w-4 h-4 text-accent-green" />;
+      case "PARTIAL": return <AlertTriangle className="w-4 h-4 text-accent-yellow" />;
+      case "UNSUPPORTED": return <XCircle className="w-4 h-4 text-accent-red" />;
+      case "UNVERIFIABLE": return <HelpCircle className="w-4 h-4 opacity-40" />;
+      default: return null;
+    }
+  };
+
   const getVerdictTagClass = (verdict: string) => {
     switch (verdict) {
       case "VERIFIED": return "bg-accent-green text-paper";
@@ -169,192 +317,291 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-paper p-4 md:p-10 flex flex-col">
-      {/* Header */}
+    <div className="min-h-screen bg-paper p-4 md:p-10 flex flex-col font-sans">
       <header className="flex justify-between items-end border-b-2 border-ink pb-3 mb-8">
-        <div className="font-serif text-2xl font-black tracking-tighter uppercase">
+        <div className="font-serif text-3xl font-black tracking-tighter uppercase leading-none">
           TruthLens AI
         </div>
-        <div className="font-mono text-[10px] uppercase tracking-wider opacity-60 hidden md:block">
-          Verification Protokol // ID: {result ? `TL-${Math.floor(Math.random() * 9000) + 1000}` : "WAITING"}
+        <div className="font-mono text-[10px] uppercase tracking-widest opacity-60 hidden md:block">
+          Evidence-First Verification Protokol // v2.1.0
         </div>
       </header>
 
-      <main className="grid grid-cols-1 lg:grid-cols-[350px_1fr] gap-10 flex-grow">
-        {/* Sidebar Flow */}
-        <section className="flex flex-col gap-8">
-          {/* Main Controls (Input Mode) */}
-          {!result || loading ? (
-            <div className="space-y-6">
-              <section className="">
-                <h2 className="editorial-title">Submission Claim</h2>
-                <textarea 
-                  placeholder="Paste claimed metrics, growth, or technical breakthroughs..."
-                  className="w-full h-32 bg-white border border-line p-4 font-serif italic text-sm focus:outline-none focus:border-ink transition-colors resize-none mb-4"
-                  value={claim}
-                  onChange={(e) => setClaim(e.target.value)}
-                />
-              </section>
-
-              <section className="">
-                <h2 className="editorial-title">Repository Evidence</h2>
-                <textarea 
-                  placeholder="Insert README content, dependency lists, and tree structures..."
-                  className="w-full h-64 bg-white border border-line p-4 font-mono text-xs focus:outline-none focus:border-ink transition-colors resize-none"
-                  value={evidence}
-                  onChange={(e) => setEvidence(e.target.value)}
-                />
-              </section>
-
+      <main className="grid grid-cols-1 lg:grid-cols-[1fr_450px] gap-12 flex-grow">
+        {/* Input Interface */}
+        <section className="space-y-10 order-2 lg:order-1">
+          <div className="space-y-6">
+            <div className="flex justify-between items-center border-b border-line pb-2">
+              <h2 className="font-serif italic text-xl">Pitch Deck Claims</h2>
               <button 
-                onClick={handleVerify}
-                disabled={loading}
-                className="w-full py-4 bg-ink text-paper font-bold uppercase tracking-widest text-sm hover:opacity-90 disabled:opacity-50 transition-all"
+                onClick={addClaim}
+                disabled={claims.length >= 5}
+                className="p-1 hover:bg-ink hover:text-paper rounded transition-colors"
+                title="Add Claim"
               >
-                {loading ? "ANALYZING..." : "GENERATE VERIFICATION REPORT"}
+                <Plus className="w-5 h-5" />
               </button>
-
-              {error && (
-                <div className="p-3 border border-accent-red text-accent-red text-[10px] font-mono uppercase bg-white">
-                  ERROR: {error}
-                </div>
-              )}
             </div>
-          ) : (
-            <>
-              {/* Score Box in Sidebar for Report Mode */}
-              <div className="border border-ink p-8 text-center bg-white">
-                <p className="text-[11px] uppercase tracking-[0.2em] mb-3 opacity-60">Trust Score</p>
-                <div className="score-display">{result.trust_score}</div>
-                <div className={`verdict-tag mt-4 ${getVerdictTagClass(result.verdict)}`}>
-                  {result.verdict}
+            
+            <div className="space-y-4">
+              {claims.map((claim, index) => (
+                <div key={index} className="flex gap-4 group">
+                  <div className="font-mono text-xs opacity-30 mt-3">{index + 1}</div>
+                  <textarea 
+                    value={claim}
+                    onChange={(e) => updateClaim(index, e.target.value)}
+                    placeholder="Enter a specific claim from the pitch deck (e.g. 'Serves 10k daily users')"
+                    className="flex-grow bg-white border border-line p-3 font-serif text-sm italic focus:outline-none focus:border-ink transition-colors resize-none h-20 shadow-sm"
+                  />
+                  <button 
+                    onClick={() => removeClaim(index)}
+                    className="opacity-0 group-hover:opacity-40 hover:opacity-100 p-1 self-start transition-opacity text-accent-red"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
                 </div>
-                <div className="mt-6 flex justify-between items-center text-[10px] font-mono uppercase tracking-widest opacity-60 border-t border-line pt-4">
-                  <span>Confidence</span>
-                  <span className="font-bold text-ink">{result.confidence_level}%</span>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-6">
+            <h2 className="editorial-title">Repository Artifacts</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 bg-white/40 p-6 border border-line">
+              <div className="space-y-4">
+                <div className="space-y-1">
+                  <label className="text-[10px] font-mono uppercase tracking-widest opacity-60">Repo Name</label>
+                  <input 
+                    className="w-full bg-white border border-line p-2 text-sm focus:outline-none focus:border-ink" 
+                    value={repo.name}
+                    onChange={e => setRepo({...repo, name: e.target.value})}
+                  />
                 </div>
-                
-                <button 
-                  onClick={() => setResult(null)}
-                  className="mt-6 text-[10px] font-mono uppercase tracking-widest underline opacity-40 hover:opacity-100"
-                >
-                  Reset Verification
-                </button>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-mono uppercase tracking-widest opacity-60">Description</label>
+                  <textarea 
+                    className="w-full bg-white border border-line p-2 text-sm focus:outline-none focus:border-ink h-20 resize-none"
+                    value={repo.description}
+                    onChange={e => setRepo({...repo, description: e.target.value})}
+                  />
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-mono uppercase tracking-widest opacity-60">Commits</label>
+                    <input 
+                      type="number"
+                      className="w-full bg-white border border-line p-2 text-sm focus:outline-none focus:border-ink" 
+                      value={repo.commit_count}
+                      onChange={e => setRepo({...repo, commit_count: parseInt(e.target.value) || 0})}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-mono uppercase tracking-widest opacity-60">Stars</label>
+                    <input 
+                      type="number"
+                      className="w-full bg-white border border-line p-2 text-sm focus:outline-none focus:border-ink" 
+                      value={repo.stars}
+                      onChange={e => setRepo({...repo, stars: parseInt(e.target.value) || 0})}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-mono uppercase tracking-widest opacity-60">Language</label>
+                    <input 
+                      className="w-full bg-white border border-line p-2 text-sm focus:outline-none focus:border-ink" 
+                      value={repo.language}
+                      onChange={e => setRepo({...repo, language: e.target.value})}
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 pt-2">
+                   <input 
+                    type="checkbox" 
+                    id="releases"
+                    checked={repo.has_releases}
+                    onChange={e => setRepo({...repo, has_releases: e.target.checked})}
+                    className="accent-ink w-4 h-4 cursor-pointer"
+                   />
+                   <label htmlFor="releases" className="text-[10px] font-mono uppercase tracking-widest cursor-pointer">Has Official Releases</label>
+                </div>
               </div>
-
-              <div className="space-y-6">
-                <section>
-                  <h2 className="editorial-title">Claim Summary</h2>
-                  <p className="font-serif text-sm leading-relaxed text-ink/80 italic">
-                    "{result.claim_summary}"
-                  </p>
-                </section>
-
-                <section>
-                  <h2 className="editorial-title">Verification Basis</h2>
-                  <p className="font-mono text-[11px] leading-relaxed opacity-70">
-                    {result.evidence_summary}
-                  </p>
-                </section>
+              <div className="space-y-1">
+                <label className="text-[10px] font-mono uppercase tracking-widest opacity-60">README (First 1200 Chars)</label>
+                <textarea 
+                  className="w-full h-[220px] bg-white border border-line p-3 font-mono text-[11px] focus:outline-none focus:border-ink transition-colors resize-none overflow-y-auto"
+                  value={repo.readme}
+                  onChange={e => setRepo({...repo, readme: e.target.value})}
+                  placeholder="Paste the repository README here for AI inspection..."
+                />
+                <div className="text-right text-[9px] font-mono opacity-30">
+                  {repo.readme.length} / 1200 CHARS
+                </div>
               </div>
-            </>
-          )}
+            </div>
+            
+            <button 
+              onClick={handleVerify}
+              disabled={loading}
+              className="w-full py-4 bg-ink text-paper font-bold uppercase tracking-widest text-sm hover:opacity-90 disabled:opacity-50 transition-all shadow-lg flex items-center justify-center gap-3"
+            >
+              {loading ? (
+                <>
+                  <motion.div 
+                    animate={{ rotate: 360 }}
+                    transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
+                  >
+                    <Activity className="w-4 h-4" />
+                  </motion.div>
+                  AUDITING...
+                </>
+              ) : "RUN MULTI-CLAIM AUDIT"}
+            </button>
+            {error && <p className="text-accent-red font-mono text-[10px] uppercase text-center">{error}</p>}
+          </div>
         </section>
 
-        {/* Detailed Report Section */}
-        <section className="flex flex-col">
+        {/* Results / Sidebar */}
+        <section className="order-1 lg:order-2">
           <AnimatePresence mode="wait">
-            {!result ? (
+            {!result || loading ? (
               <motion.div 
-                key="placeholder"
+                key="empty"
                 initial={{ opacity: 0 }}
-                animate={{ opacity: 0.5 }}
-                className="border-2 border-dashed border-line rounded flex items-center justify-center p-20 text-center h-full"
+                animate={{ opacity: 0.4 }}
+                exit={{ opacity: 0 }}
+                className="border-2 border-dashed border-line p-10 text-center h-full flex flex-col items-center justify-center space-y-6"
               >
-                <div className="space-y-4">
-                  <Terminal className="w-12 h-12 mx-auto mb-4" />
-                  <p className="font-serif italic text-xl">Verification Engine Standby</p>
-                  <p className="font-mono text-[10px] uppercase tracking-[0.3em] max-w-xs">Waiting for startup credentials and repository link context.</p>
+                <div className="grid grid-cols-2 gap-2 opacity-50">
+                   <ShieldCheck className="w-8 h-8 mx-auto" />
+                   <Github className="w-8 h-8 mx-auto" />
+                </div>
+                <div className="space-y-2">
+                  <h3 className="font-serif italic text-xl">Verification Pending</h3>
+                  <p className="font-mono text-[10px] uppercase tracking-widest max-w-xs mx-auto">
+                    Input hackathon claims and repository metadata to generate an evidence-based audit report.
+                  </p>
                 </div>
               </motion.div>
             ) : (
               <motion.div 
-                key="report"
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="space-y-10 h-full flex flex-col"
+                key="result"
+                initial={{ opacity: 0, x: 20 }}
+                animate={{ opacity: 1, x: 0 }}
+                className="space-y-8"
               >
-                {/* Risk Flags Grid */}
-                <section>
-                  <h2 className="editorial-title">Active Integrity Risks</h2>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {result.risk_flags.length > 0 ? result.risk_flags.map((flag, i) => (
-                      <div key={i} className="risk-item">
-                        <div className={`text-[10px] font-black uppercase tracking-wider mb-1 ${getSeverityColor(flag.severity)}`}>
-                          {flag.severity}
-                        </div>
-                        <div className="font-bold text-sm mb-1">{flag.flag}</div>
-                        <p className="text-[11px] leading-snug opacity-70">{flag.reason}</p>
-                      </div>
-                    )) : (
-                      <div className="col-span-full border border-line p-4 text-center font-serif italic text-sm opacity-40">
-                        No critical risk flags detected during analysis.
-                      </div>
-                    )}
+                {/* Score Card */}
+                <div className="editorial-card relative overflow-hidden">
+                  <div className="absolute right-[-10px] top-[-10px] opacity-5">
+                    <Award className="w-32 h-32" />
                   </div>
-                </section>
-
-                {/* Evidence Split */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
-                  <section>
-                    <h2 className="editorial-title">Verified Truths</h2>
-                    <ul className="space-y-3">
-                      {result.verified_points.map((pt, i) => (
-                        <li key={i} className="text-xs relative pl-5 flex items-start leading-relaxed">
-                          <CheckCircle2 className="w-3 h-3 text-accent-green absolute left-0 top-0" />
-                          <span>{pt}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </section>
-                  <section>
-                    <h2 className="editorial-title">Unverified Claims</h2>
-                    <ul className="space-y-3">
-                      {result.unverified_points.map((pt, i) => (
-                        <li key={i} className="text-xs relative pl-5 flex items-start leading-relaxed">
-                          <XCircle className="w-3 h-3 text-accent-red absolute left-0 top-0" />
-                          <span className="opacity-80">{pt}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </section>
+                  <div className="flex justify-between items-start mb-6">
+                    <div>
+                      <span className="text-[10px] font-mono uppercase tracking-widest opacity-60">Overall Trust Score</span>
+                      <div className="score-display">{result.overall_trust_score}</div>
+                    </div>
+                    <div className="text-right">
+                       <span className="text-[10px] font-mono uppercase tracking-widest opacity-40">Confid.</span>
+                       <div className="font-serif italic text-xl">{result.confidence_level}%</div>
+                    </div>
+                  </div>
+                  <div className={`verdict-tag ${getVerdictTagClass(result.verdict)}`}>
+                    {result.verdict}
+                  </div>
+                  <div className="mt-6 font-serif italic text-base leading-relaxed border-t border-line pt-4">
+                    {result.verdict_summary}
+                  </div>
                 </div>
 
-                {/* Recommendation Footer */}
-                <motion.div 
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: 0.2 }}
-                  className="mt-auto bg-ink text-paper p-8 relative overflow-hidden group"
-                >
-                  <div className="absolute top-[-20px] right-4 text-[120px] font-serif opacity-10 pointer-events-none group-hover:opacity-20 transition-opacity">"</div>
-                  <div className="text-[10px] font-mono uppercase tracking-[0.3em] mb-4 opacity-70 border-b border-paper/20 pb-2">
-                    Expert Recommendation
+                {/* Repo Health */}
+                <div className="border border-line p-5 bg-white">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Activity className="w-4 h-4 opacity-40" />
+                    <h3 className="text-[10px] font-mono uppercase tracking-[0.2em] font-bold">Repo Health Assessment</h3>
                   </div>
-                  <p className="font-serif italic text-lg leading-relaxed relative z-10">
-                    {result.judge_recommendation}
-                  </p>
-                </motion.div>
+                  <div className="flex justify-between items-center mb-1">
+                     <span className="font-serif italic text-lg">{result.repo_health.assessment}</span>
+                  </div>
+                  <p className="text-[11px] opacity-60 leading-tight">{result.repo_health.reason}</p>
+                </div>
+
+                {/* Individual Claims */}
+                <div className="space-y-4">
+                  <h3 className="editorial-title">Evidence Cross-Reference</h3>
+                  <div className="space-y-3">
+                    {result.claim_verdicts.map((v, i) => (
+                      <div key={i} className="p-3 border border-line bg-white/50 space-y-2 group">
+                        <div className="flex justify-between items-start">
+                          <div className="flex items-center gap-2">
+                            {getStatusIcon(v.status)}
+                            <span className="text-[9px] font-mono uppercase tracking-widest font-bold">{v.status}</span>
+                          </div>
+                          <div className={`text-[10px] font-mono ${v.trust_impact >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                            {v.trust_impact > 0 ? '+' : ''}{v.trust_impact}
+                          </div>
+                        </div>
+                        <p className="font-serif italic text-xs leading-tight opacity-90">"{v.claim}"</p>
+                        <p className="text-[10px] leading-snug opacity-40 group-hover:opacity-100 transition-opacity italic">
+                          <span className="font-bold">Proof:</span> {v.evidence_found}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Score Breakdown Table */}
+                <div className="bg-ink text-paper p-5 space-y-4">
+                   <h3 className="text-[9px] font-mono uppercase tracking-[0.3em] border-b border-paper/20 pb-2 flex items-center gap-2">
+                     <Award className="w-3 h-3" /> Audit Score Breakdown
+                   </h3>
+                   <div className="space-y-2 font-mono text-[10px]">
+                      <div className="flex justify-between opacity-40">
+                         <span>BASE_SCORE_CREDIT</span>
+                         <span>+100</span>
+                      </div>
+                      {result.score_breakdown.deductions.map((d, i) => (
+                        <div key={i} className="flex justify-between text-accent-red">
+                           <span className="truncate pr-4 flex items-center gap-1"><TrendingDown className="w-2 h-2" /> {d.reason}</span>
+                           <span className="flex-shrink-0">{d.points}</span>
+                        </div>
+                      ))}
+                      {result.score_breakdown.additions.map((a, i) => (
+                        <div key={i} className="flex justify-between text-accent-green">
+                           <span className="truncate pr-4 flex items-center gap-1"><TrendingUp className="w-2 h-2" /> {a.reason}</span>
+                           <span className="flex-shrink-0">+{a.points}</span>
+                        </div>
+                      ))}
+                      <div className="flex justify-between border-t border-paper/30 pt-2 font-bold text-base">
+                         <span>TOTAL_AUDIT_SCORE</span>
+                         <span>{result.overall_trust_score}</span>
+                      </div>
+                   </div>
+                </div>
+
+                {/* Judge Probes */}
+                <div className="space-y-4">
+                  <h3 className="editorial-title">Judge Probe Questions</h3>
+                  <div className="space-y-3">
+                    {result.judge_probe_questions.map((q, i) => (
+                      <div key={i} className="bg-white border-l-2 border-accent-yellow p-3 text-xs font-serif italic leading-relaxed shadow-sm">
+                        {q}
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </motion.div>
             )}
           </AnimatePresence>
         </section>
       </main>
 
-      {/* Footer */}
-      <footer className="mt-10 border-t border-line pt-4 flex justify-between items-center text-[10px] font-mono uppercase tracking-widest opacity-40">
-        <div>OBJECTIVE_ANALYSIS // V4.2.0</div>
-        <div>TIMESTAMP: {new Date().toISOString().replace('T', ' ').split('.')[0]} UTC</div>
+      <footer className="mt-12 border-t border-line pt-6 flex flex-col md:flex-row justify-between items-center gap-4 text-[9px] font-mono uppercase tracking-[0.2em] opacity-40">
+        <div className="flex items-center gap-4">
+          <span>OBJECTIVE_ANALYSIS_MOD_4</span>
+          <span>//</span>
+          <span>TIMESTAMP: {new Date().toISOString().replace('T', ' ').split('.')[0]} UTC</span>
+        </div>
+        <div className="flex gap-6">
+           <a href="#" className="hover:text-ink transition-colors flex items-center gap-1"><ExternalLink className="w-2 h-2" /> Verification Ethics</a>
+           <a href="#" className="hover:text-ink transition-colors flex items-center gap-1"><ExternalLink className="w-2 h-2" /> Audit Log</a>
+        </div>
       </footer>
     </div>
   );
