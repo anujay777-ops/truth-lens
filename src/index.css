@@ -1,0 +1,49 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,100..900;1,100..900&family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Helvetica Neue", Arial, system-ui, sans-serif;
+  --font-mono: "Courier New", Courier, monospace;
+  --font-serif: "Georgia", serif;
+  
+  --color-paper: #f9f8f4;
+  --color-ink: #1a1a1a;
+  --color-line: #d1cfc8;
+  --color-accent-red: #d32f2f;
+  --color-accent-green: #2e7d32;
+  --color-accent-yellow: #fbc02d;
+}
+
+@layer base {
+  body {
+    @apply bg-paper text-ink font-sans antialiased;
+  }
+}
+
+.report-border {
+  @apply border-line;
+}
+
+.ink-border {
+  @apply border-ink;
+}
+
+.editorial-title {
+  @apply font-serif italic text-lg border-b border-line pb-2 mb-3;
+}
+
+.editorial-card {
+  @apply bg-white p-5 border-l-4 border-ink shadow-[4px_4px_0px_rgba(0,0,0,0.05)];
+}
+
+.risk-item {
+  @apply p-3 border border-line bg-white;
+}
+
+.score-display {
+  @apply font-serif text-[110px] leading-none font-bold;
+}
+
+.verdict-tag {
+  @apply inline-block py-2 px-3 bg-ink text-paper font-bold text-sm text-center w-full;
+}

@@ -1,0 +1,6 @@
+{
+  "name": "TruthLens AI",
+  "description": "An objective, evidence-based hackathon submission verification engine that analyzes startup claims against GitHub repository evidence.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
