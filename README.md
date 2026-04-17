@@ -2,6 +2,8 @@
 
 **Objective Evidence-Based Verification for Startups & Developers.**
 
+[**Live Demo »**](https://truth-lens7.vercel.app/)
+
 TruthLens AI is a high-performance verification engine designed to bridge the gap between "what is claimed" and "what is built." Whether you're an investor reviewing a startup's pitch deck or an engineer verifying a candidate's GitHub profile, TruthLens uses the Gemini 1.5 Pro API to provide an objective, data-driven cross-examination of digital artifacts.
 
 ![Banner](https://images.unsplash.com/photo-1551288049-bebda4e38f71?auto=format&fit=crop&q=80&w=2070)
